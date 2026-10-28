@@ -1,0 +1,18 @@
+services:
+  # Opt-in TLS fixture for `pytest -m tls`. Uses the same vector-capable
+  # Enterprise dev image as the integration tests (linux/amd64 — runs under
+  # emulation on arm64). TLS listens on host port 4433.
+  #
+  #   sh docker/gen-tls-certs.sh
+  #   docker compose --profile tls up -d aerospike-tls
+  #   sh docker/provision-pki-user.sh
+  #
+  aerospike-tls:
+    profiles: ["tls"]
+    image: ${AEROSPIKE_TLS_IMAGE:-aerospike-server:dev}
+    ports:
+      - "${AEROSPIKE_TLS_PORT:-4443}:4333"
+    volumes:
+      - ./docker/aerospike-tls.conf:/etc/aerospike/aerospike.conf:ro
+      - ./docker/tls-certs:/opt/aerospike/certs:ro
+    # No healthcheck: the dev image ships only `asd` (no asinfo/asadm).

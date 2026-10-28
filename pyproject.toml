@@ -47,4 +47,5 @@ testpaths = ["tests"]
 addopts = ["-m", "not integration"]
 markers = [
     "integration: tests that require a running Aerospike server",
+    "tls: opt-in tests requiring the TLS-enabled Enterprise fixture (docker-compose --profile tls)",
 ]

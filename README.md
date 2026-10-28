@@ -84,14 +84,73 @@ m = Memory(config=MemoryConfig(
 | `embedding_model_dims` | `1536` | Embedding vector dimensions |
 | `host` | `"localhost"` | Seed host |
 | `port` | `3000` | Seed port |
+| `hosts` | `None` | Seed nodes as `(host, port)` or `(host, port, tls_name)` tuples; overrides `host`/`port` |
+| `tls` | `None` | `TlsSettings` (or its dict form); when set, all connections are TLS-encrypted |
+| `username` | `None` | Internal-auth username; must be paired with `password` |
+| `password` | `None` | Internal-auth password; must be paired with `username` |
+| `auth_mode` | `"internal"` | `"internal"` (username/password) or `"certificate"` (PKI client-cert auth) |
 | `allow_scans_with_where` | `False` | Permit filtered queries that do not scope by `user_id`/`agent_id`/`run_id` to fall back to a full scan |
 | `max_record_bytes` | `943718` | Client-side record-size guardrail (~0.9 MiB) |
+| `order_list_results` | `False` | Order `list()` results by `created_at` descending (adds a `created_at_ms` secondary index) |
+
+`TlsSettings` fields:
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `ca_file` | `None` | CA certificate PEM file; omit to verify against the system trust store |
+| `tls_name` | `None` | Cluster-wide TLS name; per-seed names in `hosts` take precedence |
+| `client_cert_file` | `None` | Client certificate PEM file for mTLS; paired with `client_key_file` |
+| `client_key_file` | `None` | Client private key PEM file for mTLS; paired with `client_cert_file` |
+| `protocols` | `None` | Allowed TLS protocols (e.g. `["TLSv1.2"]`); omit for SDK defaults |
+| `ciphers` | `None` | Allowed cipher suites by rustls name; omit for SDK defaults |
+
+## TLS and authentication
+
+TLS is opt-in: providing `tls` encrypts every cluster connection — there is
+no plaintext fallback. The `for_login_only` mode is intentionally not
+exposed: on this SDK build the connection cannot drop to cleartext after
+login, so TLS is all-or-nothing.
+
+```python
+config = create_memory_config(
+    vector_store={
+        "hosts": [("db1", 4433, "node1-tls"), ("db2", 4433)],  # per-seed TLS names
+        "tls": {
+            "ca_file": "/certs/ca.pem",          # omit for system trust store
+            "tls_name": "cluster-tls",           # fallback for unnamed seeds
+            "client_cert_file": "/certs/client.pem",  # mTLS
+            "client_key_file": "/certs/client.key",
+            "protocols": ["TLSv1.2"],
+        },
+        "username": "app",     # internal auth, or:
+        "password": "secret",
+        # "auth_mode": "certificate",  # PKI: requires mTLS + tls_name per seed,
+                                       # forbids username/password
+    },
+)
+```
+
+Notes:
+
+- `username`/`password` without TLS is legal (SDK posture) but sends
+  credentials in cleartext.
+- Every cluster node needs a TLS service and matching certificate identity —
+  the client connects to nodes directly.
+- `auth_mode="certificate"` maps the client certificate's CN to a provisioned
+  `nopassword` user (PKI auth, no password exchange).
 
 ## Tests
 
 ```bash
 pytest                  # mock-based unit tests, no server needed
 pytest -m integration   # requires a running Aerospike server (localhost:3000)
+
+# Opt-in TLS suite — Enterprise dev fixture (aerospike-server:dev, amd64;
+# runs under emulation on arm64):
+sh docker/gen-tls-certs.sh
+docker compose --profile tls up -d aerospike-tls
+sh docker/provision-pki-user.sh
+AEROSPIKE_TLS_CA=docker/tls-certs/ca.crt pytest -m tls
 ```
 
 ## License
