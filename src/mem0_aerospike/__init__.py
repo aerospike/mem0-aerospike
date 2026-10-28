@@ -5,6 +5,7 @@ registries, so `MemoryConfig(vector_store={"provider": "aerospike", ...})`
 works without modifying mem0ai.
 """
 
+from mem0_aerospike.configs.vector_stores.aerospike import TlsSettings
 from mem0_aerospike.patch import register_aerospike
 
 register_aerospike()
@@ -28,4 +29,4 @@ def create_memory_config(vector_store=None, **kwargs):
     return MemoryConfig(vector_store=vector_store, **kwargs)
 
 
-__all__ = ["create_memory_config", "register_aerospike"]
+__all__ = ["TlsSettings", "create_memory_config", "register_aerospike"]

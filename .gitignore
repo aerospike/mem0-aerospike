@@ -1,3 +1,6 @@
 # Python bytecode
 __pycache__/
 *.py[cod]
+
+# Generated throwaway TLS fixture material (docker/gen-tls-certs.sh)
+docker/tls-certs/

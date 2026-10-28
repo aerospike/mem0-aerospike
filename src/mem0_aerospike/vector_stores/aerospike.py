@@ -27,6 +27,7 @@ except ImportError as e:
 
 from mem0.vector_stores.base import VectorStoreBase
 
+from mem0_aerospike.configs.vector_stores.aerospike import AerospikeConfig, TlsSettings
 from mem0_aerospike.filters import (
     CORE_STRING_FIELDS,
     EMBEDDING_BIN,
@@ -63,7 +64,11 @@ class AerospikeDB(VectorStoreBase):
         embedding_model_dims: int,
         host: str = "localhost",
         port: int = 3000,
-        hosts: list[tuple[str, int]] | None = None,
+        hosts: list[tuple[str, int] | tuple[str, int, str]] | None = None,
+        tls: "TlsSettings | dict | None" = None,
+        username: str | None = None,
+        password: str | None = None,
+        auth_mode: str = "internal",
         allow_scans_with_where: bool = False,
         max_record_bytes: int = 943718,
         order_list_results: bool = False,
@@ -76,8 +81,17 @@ class AerospikeDB(VectorStoreBase):
             embedding_model_dims: Dimension of stored embedding vectors.
             host: Seed host.
             port: Seed port.
-            hosts: Seed nodes as ``(host, port)`` pairs for multi-node
-                clusters; overrides ``host``/``port`` when provided.
+            hosts: Seed nodes as ``(host, port)`` or ``(host, port, tls_name)``
+                tuples for multi-node clusters; overrides ``host``/``port``
+                when provided.
+            tls: Optional ``TlsSettings`` (or its dict form, as produced by
+                ``AerospikeConfig.model_dump()``); when set, all cluster
+                connections are TLS-encrypted.
+            username: Internal-auth username; must be paired with ``password``.
+            password: Internal-auth password; must be paired with ``username``.
+            auth_mode: ``"internal"`` (username/password) or ``"certificate"``
+                (PKI client-certificate auth; requires mTLS and a resolvable
+                tls_name on every seed).
             allow_scans_with_where: Permit filtered queries without a
                 user_id/agent_id/run_id scope predicate to fall back to a scan.
             max_record_bytes: Client-side record-size guardrail (~0.9 MiB default).
@@ -85,23 +99,66 @@ class AerospikeDB(VectorStoreBase):
                 descending and register a ``created_at_ms`` secondary index in
                 ``create_col()``. Off by default, keeping unordered results.
         """
-        self.namespace = namespace
-        self.collection_name = collection_name
-        self.embedding_model_dims = embedding_model_dims
-        self.host = host
-        self.port = port
-        self.hosts = hosts
-        self.allow_scans_with_where = allow_scans_with_where
-        self.max_record_bytes = max_record_bytes
-        self.order_list_results = order_list_results
-        self.dataset = DataSet.of(namespace, collection_name)
+        # Validate through AerospikeConfig so the direct-construction path gets
+        # the same pairing/empty-string/certificate-mode guarantees as the
+        # config-dict path (VectorStoreFactory feeds model_dump() output here).
+        validated = AerospikeConfig(
+            namespace=namespace,
+            collection_name=collection_name,
+            embedding_model_dims=embedding_model_dims,
+            host=host,
+            port=port,
+            hosts=hosts,
+            tls=tls,
+            username=username,
+            password=password,
+            auth_mode=auth_mode,
+            allow_scans_with_where=allow_scans_with_where,
+            max_record_bytes=max_record_bytes,
+            order_list_results=order_list_results,
+        )
+        self.namespace = validated.namespace
+        self.collection_name = validated.collection_name
+        self.embedding_model_dims = validated.embedding_model_dims
+        self.host = validated.host
+        self.port = validated.port
+        self.hosts = validated.hosts
+        self.tls = validated.tls
+        self.username = validated.username
+        self.password = validated.password
+        self.auth_mode = validated.auth_mode
+        self.allow_scans_with_where = validated.allow_scans_with_where
+        self.max_record_bytes = validated.max_record_bytes
+        self.order_list_results = validated.order_list_results
+        self.dataset = DataSet.of(self.namespace, self.collection_name)
 
-        if hosts:
-            logger.debug("Connecting to Aerospike seeds %s", hosts)
-            self._cluster = ClusterDefinition(hosts=[Host(h, p) for h, p in hosts]).connect()
-        else:
-            logger.debug("Connecting to Aerospike at %s:%s", host, port)
-            self._cluster = ClusterDefinition(host, port).connect()
+        global_tls_name = self.tls.tls_name if self.tls is not None else None
+        seed_entries = self.hosts if self.hosts else [(self.host, self.port)]
+        host_objs = [
+            Host(entry[0], entry[1], entry[2] if len(entry) > 2 else global_tls_name) for entry in seed_entries
+        ]
+
+        logger.debug("Connecting to Aerospike seeds %s", seed_entries)
+        definition = ClusterDefinition(hosts=host_objs)
+        if self.tls is not None:
+            builder = definition.with_tls_config_of()
+            if self.tls.ca_file is not None:
+                builder.ca_file(self.tls.ca_file)
+            if self.tls.tls_name is not None:
+                builder.tls_name(self.tls.tls_name)
+            if self.tls.client_cert_file is not None:
+                builder.client_cert_file(self.tls.client_cert_file)
+                builder.client_key_file(self.tls.client_key_file)
+            if self.tls.protocols is not None:
+                builder.protocols(*self.tls.protocols)
+            if self.tls.ciphers is not None:
+                builder.ciphers(*self.tls.ciphers)
+            builder.done()
+        if auth_mode == "certificate":
+            definition.with_certificate_credentials()
+        elif username is not None:
+            definition.with_native_credentials(username, password)
+        self._cluster = definition.connect()
         logger.info("Connected to Aerospike namespace=%s set=%s", namespace, collection_name)
         # sendKey = true so memory_id can be recovered from secondary-index and
         # Top-K query results, which otherwise return only digests.
@@ -162,13 +219,7 @@ class AerospikeDB(VectorStoreBase):
         if self.order_list_results:
             index_name = f"{collection_name}_created_at_ms_idx"
             if index_name not in existing:
-                task = (
-                    self.session.index(dataset=dataset)
-                    .on_bin("created_at_ms")
-                    .named(index_name)
-                    .numeric()
-                    .create()
-                )
+                task = self.session.index(dataset=dataset).on_bin("created_at_ms").named(index_name).numeric().create()
                 task.wait_till_complete_blocking()
 
     def list_cols(self):
